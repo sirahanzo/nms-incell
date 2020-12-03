@@ -1,0 +1,721 @@
+<?php
+
+namespace App\Jobs;
+
+use DB;
+use Illuminate\Bus\Queueable;
+use Illuminate\Http\Request;
+use Illuminate\Queue\SerializesModels;
+use Illuminate\Queue\InteractsWithQueue;
+use Illuminate\Contracts\Queue\ShouldQueue;
+use Illuminate\Foundation\Bus\Dispatchable;
+
+class DailyReportCalculationJob implements ShouldQueue {
+
+
+    use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
+
+
+    private $regionOId;
+    private $siteOid;
+    private $statusBattery;
+    private $socEnd;
+    private $packID;
+    private $snPack;
+
+
+    /**
+     * Create a new job instance.
+     *
+     * @return void
+     */
+    public function __construct($region_oid,$site_oid, $pack_id,$sn_pack,Request $request)
+    {
+        //
+        $this->regionOId = $region_oid;
+        $this->siteOid = $site_oid;
+        $this->statusBattery = $request->get('status_batt');
+        $this->socEnd = $request->get('SOC');
+        $this->packID = $pack_id;
+        $this->snPack = $sn_pack;
+
+
+    }
+
+
+    /**
+     * Execute the job.
+     *
+     * @return void
+     */
+    public function handle()
+    {
+        //$region_oid = $site->region_oid;
+        //$site_oid = $this->siteOid;
+        $current_time = new \DateTime();
+        $current_month = $current_time->format('F');
+        $current_year = $current_time->format('Y');
+        $current_system_state = $this->statusBattery;
+        //$soc_end = $request->get('SOC');
+
+        $last_status = DB::table('raw_availability')
+            ->where('site_oid', '=', $this->siteOid)
+            ->where('pack_id', '=', ltrim($this->packID, 'pack'))
+            ->where('updated_at', '=', null)
+            ->first();
+
+        //$delta_time = ($current_time->format('Y-m-d H:i:s') - $last_status->created_at)/3600;
+        $ts1 = strtotime($last_status->created_at);
+        $ts2 = strtotime($current_time->format('Y-m-d H:i:s'));
+        $seconds_diff = $ts2 - $ts1;
+        $delta_time = ($seconds_diff / 3600);
+
+        switch ($current_system_state) {
+            case 1:
+                if ($last_status == null) {
+                    echo 'insert new data on system charge';
+                    DB::table('raw_availability')
+                        ->insert([
+                            'region_oid'      => $this->regionOId,
+                            'site_oid'        => $this->siteOid,
+                            'pack_id'         => ltrim($this->packID, 'pack'),
+                            'serial_number'   => $this->snPack,
+                            'month_of_data'   => $current_month,
+                            'year_of_data'    => $current_year,
+                            'system_state'    => $current_system_state,
+                            'avg_bus_current' => 0,
+                            'avg_bus_voltage' => 0,
+                            'best_power'      => 0,
+                            'peak_power'      => 0,
+                            'soc_start'       => $this->socEnd,
+                            'soc_end'         => 0,
+                            'max_bus_current' => 0,
+                            'duration_hour'   => 0,
+                            'created_at'      => $current_time->format('Y-m-d H:i:s'),
+                        ]);
+
+
+                } elseif ($last_status->system_state != $current_system_state) {
+                    echo 'update data and insert new data system_state';
+                    $avg_vbus = DB::table('log_polling_data')
+                        ->where('site_oid', '=', $this->siteOid)
+                        ->where('parameter_id', '=', 2)
+                        ->where('log_polling_data.updated_at', '>=', $last_status->created_at)
+                        ->where('log_polling_data.updated_at', '<=', date('Y-m-d ', strtotime($current_time->format('Y-m-d H:i:s') . ' +1 day')))
+                        ->average($this->packID);
+
+                    $avg_ibus = DB::table('log_polling_data')
+                        ->where('site_oid', '=', $this->siteOid)
+                        ->where('parameter_id', '=', 3)
+                        ->where('log_polling_data.updated_at', '>=', $last_status->created_at)
+                        ->where('log_polling_data.updated_at', '<=', date('Y-m-d ', strtotime($current_time->format('Y-m-d H:i:s') . ' +1 day')))
+                        ->average($this->packID);
+
+                    $max_ibus = DB::table('log_polling_data')
+                        ->where('site_oid', '=', $this->siteOid)
+                        ->where('parameter_id', '=', 3)
+                        ->where('log_polling_data.updated_at', '>=', $last_status->created_at)
+                        ->where('log_polling_data.updated_at', '<=', date('Y-m-d ', strtotime($current_time->format('Y-m-d H:i:s') . ' +1 day')))
+                        ->max($this->packID);
+
+                    DB::table('raw_availability')
+                        ->where('site_oid', '=', $this->siteOid)
+                        ->where('pack_id', '=', ltrim($this->packID, 'pack'))
+                        ->where('updated_at', '=', null)
+                        ->update([
+                            'avg_bus_current' => ($avg_ibus == null) ? 0 : $avg_ibus,
+                            'avg_bus_voltage' => ($avg_vbus == null) ? 0 : $avg_vbus,
+                            'best_power'      => 0,
+                            'peak_power'      => 0,
+                            'soc_end'         => $this->socEnd,
+                            'max_bus_current' => ($max_ibus == null) ? 0 : $max_ibus,
+                            'duration_hour'   => $delta_time,
+                            'updated_at'      => $current_time->format('Y-m-d H:i:s'),
+                        ]);
+
+                    DB::table('raw_availability')
+                        ->insert([
+                            'region_oid'      => $this->regionOId,
+                            'site_oid'        => $this->siteOid,
+                            'pack_id'         => ltrim($this->packID, 'pack'),
+                            'serial_number'   => $this->snPack,
+                            'month_of_data'   => $current_month,
+                            'year_of_data'    => $current_year,
+                            'system_state'    => $current_system_state,
+                            'avg_bus_current' => 0,
+                            'avg_bus_voltage' => 0,
+                            'best_power'      => 0,
+                            'peak_power'      => 0,
+                            'soc_start'       => $this->socEnd,
+                            'soc_end'         => 0,
+                            'max_bus_current' => 0,
+                            'duration_hour'   => 0,
+                            'created_at'      => $current_time->format('Y-m-d H:i:s'),
+                        ]);
+
+                } else {
+                    echo 'update existing data';
+                    $avg_vbus = DB::table('log_polling_data')
+                        ->where('site_oid', '=', $this->siteOid)
+                        ->where('parameter_id', '=', 2)
+                        ->where('log_polling_data.updated_at', '>=', $last_status->created_at)
+                        ->where('log_polling_data.updated_at', '<=', date('Y-m-d ', strtotime($current_time->format('Y-m-d H:i:s') . ' +1 day')))
+                        ->average($this->packID);
+
+                    $avg_ibus = DB::table('log_polling_data')
+                        ->where('site_oid', '=', $this->siteOid)
+                        ->where('parameter_id', '=', 3)
+                        ->where('log_polling_data.updated_at', '>=', $last_status->created_at)
+                        ->where('log_polling_data.updated_at', '<=', date('Y-m-d ', strtotime($current_time->format('Y-m-d H:i:s') . ' +1 day')))
+                        ->average($this->packID);
+
+                    $max_ibus = DB::table('log_polling_data')
+                        ->where('site_oid', '=', $this->siteOid)
+                        ->where('parameter_id', '=', 3)
+                        ->where('log_polling_data.updated_at', '>=', $last_status->created_at)
+                        ->where('log_polling_data.updated_at', '<=', date('Y-m-d ', strtotime($current_time->format('Y-m-d H:i:s') . ' +1 day')))
+                        ->max($this->packID);
+
+                    DB::table('raw_availability')
+                        ->where('site_oid', '=', $this->siteOid)
+                        ->where('pack_id', '=', ltrim($this->packID, 'pack'))
+                        ->where('updated_at', '=', null)
+                        ->update([
+                            'avg_bus_current' => ($avg_ibus == null) ? 0 : $avg_ibus,
+                            'avg_bus_voltage' => ($avg_vbus == null) ? 0 : $avg_vbus,
+                            'best_power'      => 0,
+                            'peak_power'      => 0,
+                            'soc_end'         => $this->socEnd,
+                            'max_bus_current' => ($max_ibus == null) ? 0 : $max_ibus,
+                            'duration_hour'   => $delta_time,
+                        ]);
+
+
+                }
+
+                $msg = [
+                    'status battery' => 'charge',
+
+                ];
+
+
+                break;
+            case 2:
+                if ($last_status == null) {
+                    echo 'insert new data on system discharge';
+                    DB::table('raw_availability')
+                        ->insert([
+                            'region_oid'      => $this->regionOId,
+                            'site_oid'        => $this->siteOid,
+                            'pack_id'         => ltrim($this->packID, 'pack'),
+                            'serial_number'   => $this->snPack,
+                            'month_of_data'   => $current_month,
+                            'year_of_data'    => $current_year,
+                            'system_state'    => $current_system_state,
+                            'avg_bus_current' => 0,
+                            'avg_bus_voltage' => 0,
+                            'best_power'      => 0,
+                            'peak_power'      => 0,
+                            'soc_start'       => $this->socEnd,
+                            'soc_end'         => 0,
+                            'max_bus_current' => 0,
+                            'duration_hour'   => 0,
+                            'created_at'      => $current_time->format('Y-m-d H:i:s'),
+                        ]);
+
+
+                } elseif ($last_status->system_state != $current_system_state) {
+                    echo 'update data and insert new data system_state';
+                    $avg_vbus = DB::table('log_polling_data')
+                        ->where('site_oid', '=', $this->siteOid)
+                        ->where('parameter_id', '=', 2)
+                        ->where('log_polling_data.updated_at', '>=', $last_status->created_at)
+                        ->where('log_polling_data.updated_at', '<=', date('Y-m-d ', strtotime($current_time->format('Y-m-d H:i:s') . ' +1 day')))
+                        ->average($this->packID);
+
+                    $avg_ibus = DB::table('log_polling_data')
+                        ->where('site_oid', '=', $this->siteOid)
+                        ->where('parameter_id', '=', 3)
+                        ->where('log_polling_data.updated_at', '>=', $last_status->created_at)
+                        ->where('log_polling_data.updated_at', '<=', date('Y-m-d ', strtotime($current_time->format('Y-m-d H:i:s') . ' +1 day')))
+                        ->average($this->packID);
+
+                    $max_ibus = DB::table('log_polling_data')
+                        ->where('site_oid', '=', $this->siteOid)
+                        ->where('parameter_id', '=', 3)
+                        ->where('log_polling_data.updated_at', '>=', $last_status->created_at)
+                        ->where('log_polling_data.updated_at', '<=', date('Y-m-d ', strtotime($current_time->format('Y-m-d H:i:s') . ' +1 day')))
+                        ->max($this->packID);
+
+                    DB::table('raw_availability')
+                        ->where('site_oid', '=', $this->siteOid)
+                        ->where('pack_id', '=', ltrim($this->packID, 'pack'))
+                        ->where('updated_at', '=', null)
+                        ->update([
+                            'avg_bus_current' => ($avg_ibus == null) ? 0 : $avg_ibus,
+                            'avg_bus_voltage' => ($avg_vbus == null) ? 0 : $avg_vbus,
+                            'best_power'      => 0,
+                            'peak_power'      => 0,
+                            'soc_end'         => $this->socEnd,
+                            'max_bus_current' => ($max_ibus == null) ? 0 : $max_ibus,
+                            'duration_hour'   => $delta_time,
+                            'updated_at'      => $current_time->format('Y-m-d H:i:s'),
+                        ]);
+
+                    DB::table('raw_availability')
+                        ->insert([
+                            'region_oid'      => $this->regionOId,
+                            'site_oid'        => $this->siteOid,
+                            'pack_id'         => ltrim($this->packID, 'pack'),
+                            'serial_number'   => $this->snPack,
+                            'month_of_data'   => $current_month,
+                            'year_of_data'    => $current_year,
+                            'system_state'    => $current_system_state,
+                            'avg_bus_current' => 0,
+                            'avg_bus_voltage' => 0,
+                            'best_power'      => 0,
+                            'peak_power'      => 0,
+                            'soc_start'       => $this->socEnd,
+                            'soc_end'         => 0,
+                            'max_bus_current' => 0,
+                            'duration_hour'   => 0,
+                            'created_at'      => $current_time->format('Y-m-d H:i:s'),
+                        ]);
+
+                } else {
+                    echo 'update existing data';
+                    $avg_vbus = DB::table('log_polling_data')
+                        ->where('site_oid', '=', $this->siteOid)
+                        ->where('parameter_id', '=', 2)
+                        ->where('log_polling_data.updated_at', '>=', $last_status->created_at)
+                        ->where('log_polling_data.updated_at', '<=', date('Y-m-d ', strtotime($current_time->format('Y-m-d H:i:s') . ' +1 day')))
+                        ->average($this->packID);
+
+                    $avg_ibus = DB::table('log_polling_data')
+                        ->where('site_oid', '=', $this->siteOid)
+                        ->where('parameter_id', '=', 3)
+                        ->where('log_polling_data.updated_at', '>=', $last_status->created_at)
+                        ->where('log_polling_data.updated_at', '<=', date('Y-m-d ', strtotime($current_time->format('Y-m-d H:i:s') . ' +1 day')))
+                        ->average($this->packID);
+
+                    $max_ibus = DB::table('log_polling_data')
+                        ->where('site_oid', '=', $this->siteOid)
+                        ->where('parameter_id', '=', 3)
+                        ->where('log_polling_data.updated_at', '>=', $last_status->created_at)
+                        ->where('log_polling_data.updated_at', '<=', date('Y-m-d ', strtotime($current_time->format('Y-m-d H:i:s') . ' +1 day')))
+                        ->max($this->packID);
+
+                    DB::table('raw_availability')
+                        ->where('site_oid', '=', $this->siteOid)
+                        ->where('pack_id', '=', ltrim($this->packID, 'pack'))
+                        ->where('updated_at', '=', null)
+                        ->update([
+                            'avg_bus_current' => ($avg_ibus == null) ? 0 : $avg_ibus,
+                            'avg_bus_voltage' => ($avg_vbus == null) ? 0 : $avg_vbus,
+                            'best_power'      => 0,
+                            'peak_power'      => 0,
+                            'soc_end'         => $this->socEnd,
+                            'max_bus_current' => ($max_ibus == null) ? 0 : $max_ibus,
+                            'duration_hour'   => $delta_time,
+                        ]);
+
+
+                }
+
+                $msg = [
+                    'status battery' => 'grid off/dcg',
+                ];
+                break;
+            case 3:
+                if ($last_status == null) {
+                    echo 'insert new data on system ready/float';
+                    DB::table('raw_availability')
+                        ->insert([
+                            'region_oid'      => $this->regionOId,
+                            'site_oid'        => $this->siteOid,
+                            'pack_id'         => ltrim($this->packID, 'pack'),
+                            'serial_number'   => $this->snPack,
+                            'month_of_data'   => $current_month,
+                            'year_of_data'    => $current_year,
+                            'system_state'    => $current_system_state,
+                            'avg_bus_current' => 0,
+                            'avg_bus_voltage' => 0,
+                            'best_power'      => 0,
+                            'peak_power'      => 0,
+                            'soc_start'       => $this->socEnd,
+                            'soc_end'         => 0,
+                            'max_bus_current' => 0,
+                            'duration_hour'   => 0,
+                            'created_at'      => $current_time->format('Y-m-d H:i:s'),
+                        ]);
+
+
+                } elseif ($last_status->system_state != $current_system_state) {
+                    echo 'update data and insert new data system_state';
+                    $avg_vbus = DB::table('log_polling_data')
+                        ->where('site_oid', '=', $this->siteOid)
+                        ->where('parameter_id', '=', 2)
+                        ->where('log_polling_data.updated_at', '>=', $last_status->created_at)
+                        ->where('log_polling_data.updated_at', '<=', date('Y-m-d ', strtotime($current_time->format('Y-m-d H:i:s') . ' +1 day')))
+                        ->average($this->packID);
+
+                    $avg_ibus = DB::table('log_polling_data')
+                        ->where('site_oid', '=', $this->siteOid)
+                        ->where('parameter_id', '=', 3)
+                        ->where('log_polling_data.updated_at', '>=', $last_status->created_at)
+                        ->where('log_polling_data.updated_at', '<=', date('Y-m-d ', strtotime($current_time->format('Y-m-d H:i:s') . ' +1 day')))
+                        ->average($this->packID);
+
+                    $max_ibus = DB::table('log_polling_data')
+                        ->where('site_oid', '=', $this->siteOid)
+                        ->where('parameter_id', '=', 3)
+                        ->where('log_polling_data.updated_at', '>=', $last_status->created_at)
+                        ->where('log_polling_data.updated_at', '<=', date('Y-m-d ', strtotime($current_time->format('Y-m-d H:i:s') . ' +1 day')))
+                        ->max($this->packID);
+
+                    DB::table('raw_availability')
+                        ->where('site_oid', '=', $this->siteOid)
+                        ->where('pack_id', '=', ltrim($this->packID, 'pack'))
+                        ->where('updated_at', '=', null)
+                        ->update([
+                            'avg_bus_current' => ($avg_ibus == null) ? 0 : $avg_ibus,
+                            'avg_bus_voltage' => ($avg_vbus == null) ? 0 : $avg_vbus,
+                            'best_power'      => 0,
+                            'peak_power'      => 0,
+                            'soc_end'         => $this->socEnd,
+                            'max_bus_current' => ($max_ibus == null) ? 0 : $max_ibus,
+                            'duration_hour'   => $delta_time,
+                            'updated_at'      => $current_time->format('Y-m-d H:i:s'),
+                        ]);
+
+                    DB::table('raw_availability')
+                        ->insert([
+                            'region_oid'      => $this->regionOId,
+                            'site_oid'        => $this->siteOid,
+                            'pack_id'         => ltrim($this->packID, 'pack'),
+                            'serial_number'   => $this->snPack,
+                            'month_of_data'   => $current_month,
+                            'year_of_data'    => $current_year,
+                            'system_state'    => $current_system_state,
+                            'avg_bus_current' => 0,
+                            'avg_bus_voltage' => 0,
+                            'best_power'      => 0,
+                            'peak_power'      => 0,
+                            'soc_start'       => $this->socEnd,
+                            'soc_end'         => 0,
+                            'max_bus_current' => 0,
+                            'duration_hour'   => 0,
+                            'created_at'      => $current_time->format('Y-m-d H:i:s'),
+                        ]);
+
+                } else {
+                    echo 'update existing data';
+                    $avg_vbus = DB::table('log_polling_data')
+                        ->where('site_oid', '=', $this->siteOid)
+                        ->where('parameter_id', '=', 2)
+                        ->where('log_polling_data.updated_at', '>=', $last_status->created_at)
+                        ->where('log_polling_data.updated_at', '<=', date('Y-m-d ', strtotime($current_time->format('Y-m-d H:i:s') . ' +1 day')))
+                        ->average($this->packID);
+
+                    $avg_ibus = DB::table('log_polling_data')
+                        ->where('site_oid', '=', $this->siteOid)
+                        ->where('parameter_id', '=', 3)
+                        ->where('log_polling_data.updated_at', '>=', $last_status->created_at)
+                        ->where('log_polling_data.updated_at', '<=', date('Y-m-d ', strtotime($current_time->format('Y-m-d H:i:s') . ' +1 day')))
+                        ->average($this->packID);
+
+                    $max_ibus = DB::table('log_polling_data')
+                        ->where('site_oid', '=', $this->siteOid)
+                        ->where('parameter_id', '=', 3)
+                        ->where('log_polling_data.updated_at', '>=', $last_status->created_at)
+                        ->where('log_polling_data.updated_at', '<=', date('Y-m-d ', strtotime($current_time->format('Y-m-d H:i:s') . ' +1 day')))
+                        ->max($this->packID);
+
+                    DB::table('raw_availability')
+                        ->where('site_oid', '=', $this->siteOid)
+                        ->where('pack_id', '=', ltrim($this->packID, 'pack'))
+                        ->where('updated_at', '=', null)
+                        ->update([
+                            'avg_bus_current' => ($avg_ibus == null) ? 0 : $avg_ibus,
+                            'avg_bus_voltage' => ($avg_vbus == null) ? 0 : $avg_vbus,
+                            'best_power'      => 0,
+                            'peak_power'      => 0,
+                            'soc_end'         => $this->socEnd,
+                            'max_bus_current' => ($max_ibus == null) ? 0 : $max_ibus,
+                            'duration_hour'   => $delta_time,
+                        ]);
+
+
+                }
+
+                $msg = [
+                    'status battery' => 'grid on/chg',
+                ];
+                break;
+            case 4:
+                if ($last_status == null) {
+                    echo 'insert new data on system commlost';
+                    DB::table('raw_availability')
+                        ->insert([
+                            'region_oid'      => $this->regionOId,
+                            'site_oid'        => $this->siteOid,
+                            'pack_id'         => ltrim($this->packID, 'pack'),
+                            'serial_number'   => $this->snPack,
+                            'month_of_data'   => $current_month,
+                            'year_of_data'    => $current_year,
+                            'system_state'    => $current_system_state,
+                            'avg_bus_current' => 0,
+                            'avg_bus_voltage' => 0,
+                            'best_power'      => 0,
+                            'peak_power'      => 0,
+                            'soc_start'       => $this->socEnd,
+                            'soc_end'         => 0,
+                            'max_bus_current' => 0,
+                            'duration_hour'   => 0,
+                            'created_at'      => $current_time->format('Y-m-d H:i:s'),
+                        ]);
+
+
+                } elseif ($last_status->system_state != $current_system_state) {
+                    echo 'update data and insert new data system_state';
+                    $avg_vbus = DB::table('log_polling_data')
+                        ->where('site_oid', '=', $this->siteOid)
+                        ->where('parameter_id', '=', 2)
+                        ->where('log_polling_data.updated_at', '>=', $last_status->created_at)
+                        ->where('log_polling_data.updated_at', '<=', date('Y-m-d ', strtotime($current_time->format('Y-m-d H:i:s') . ' +1 day')))
+                        ->average($this->packID);
+
+                    $avg_ibus = DB::table('log_polling_data')
+                        ->where('site_oid', '=', $this->siteOid)
+                        ->where('parameter_id', '=', 3)
+                        ->where('log_polling_data.updated_at', '>=', $last_status->created_at)
+                        ->where('log_polling_data.updated_at', '<=', date('Y-m-d ', strtotime($current_time->format('Y-m-d H:i:s') . ' +1 day')))
+                        ->average($this->packID);
+
+                    $max_ibus = DB::table('log_polling_data')
+                        ->where('site_oid', '=', $this->siteOid)
+                        ->where('parameter_id', '=', 3)
+                        ->where('log_polling_data.updated_at', '>=', $last_status->created_at)
+                        ->where('log_polling_data.updated_at', '<=', date('Y-m-d ', strtotime($current_time->format('Y-m-d H:i:s') . ' +1 day')))
+                        ->max($this->packID);
+
+                    DB::table('raw_availability')
+                        ->where('site_oid', '=', $this->siteOid)
+                        ->where('pack_id', '=', ltrim($this->packID, 'pack'))
+                        ->where('updated_at', '=', null)
+                        ->update([
+                            'avg_bus_current' => ($avg_ibus == null) ? 0 : $avg_ibus,
+                            'avg_bus_voltage' => ($avg_vbus == null) ? 0 : $avg_vbus,
+                            'best_power'      => 0,
+                            'peak_power'      => 0,
+                            'soc_end'         => $this->socEnd,
+                            'max_bus_current' => ($max_ibus == null) ? 0 : $max_ibus,
+                            'duration_hour'   => $delta_time,
+                            'updated_at'      => $current_time->format('Y-m-d H:i:s'),
+                        ]);
+
+                    DB::table('raw_availability')
+                        ->insert([
+                            'region_oid'      => $this->regionOId,
+                            'site_oid'        => $this->siteOid,
+                            'pack_id'         => ltrim($this->packID, 'pack'),
+                            'serial_number'   => $this->snPack,
+                            'month_of_data'   => $current_month,
+                            'year_of_data'    => $current_year,
+                            'system_state'    => $current_system_state,
+                            'avg_bus_current' => 0,
+                            'avg_bus_voltage' => 0,
+                            'best_power'      => 0,
+                            'peak_power'      => 0,
+                            'soc_start'       => $this->socEnd,
+                            'soc_end'         => 0,
+                            'max_bus_current' => 0,
+                            'duration_hour'   => 0,
+                            'created_at'      => $current_time->format('Y-m-d H:i:s'),
+                        ]);
+
+                } else {
+                    echo 'update existing data';
+                    $avg_vbus = DB::table('log_polling_data')
+                        ->where('site_oid', '=', $this->siteOid)
+                        ->where('parameter_id', '=', 2)
+                        ->where('log_polling_data.updated_at', '>=', $last_status->created_at)
+                        ->where('log_polling_data.updated_at', '<=', date('Y-m-d ', strtotime($current_time->format('Y-m-d H:i:s') . ' +1 day')))
+                        ->average($this->packID);
+
+                    $avg_ibus = DB::table('log_polling_data')
+                        ->where('site_oid', '=', $this->siteOid)
+                        ->where('parameter_id', '=', 3)
+                        ->where('log_polling_data.updated_at', '>=', $last_status->created_at)
+                        ->where('log_polling_data.updated_at', '<=', date('Y-m-d ', strtotime($current_time->format('Y-m-d H:i:s') . ' +1 day')))
+                        ->average($this->packID);
+
+                    $max_ibus = DB::table('log_polling_data')
+                        ->where('site_oid', '=', $this->siteOid)
+                        ->where('parameter_id', '=', 3)
+                        ->where('log_polling_data.updated_at', '>=', $last_status->created_at)
+                        ->where('log_polling_data.updated_at', '<=', date('Y-m-d ', strtotime($current_time->format('Y-m-d H:i:s') . ' +1 day')))
+                        ->max($this->packID);
+
+                    DB::table('raw_availability')
+                        ->where('site_oid', '=', $this->siteOid)
+                        ->where('pack_id', '=', ltrim($this->packID, 'pack'))
+                        ->where('updated_at', '=', null)
+                        ->update([
+                            'avg_bus_current' => ($avg_ibus == null) ? 0 : $avg_ibus,
+                            'avg_bus_voltage' => ($avg_vbus == null) ? 0 : $avg_vbus,
+                            'best_power'      => 0,
+                            'peak_power'      => 0,
+                            'soc_end'         => $this->socEnd,
+                            'max_bus_current' => ($max_ibus == null) ? 0 : $max_ibus,
+                            'duration_hour'   => $delta_time,
+                        ]);
+
+
+                }
+                $msg = [
+                    'status battery' => 'battery commlost',
+                ];
+                break;
+
+        }
+    }
+
+
+    /**
+     * @param $last_status
+     * @param $region_oid
+     * @param $site_oid
+     * @param $this->packID
+     * @param $sn_pack
+     * @param $current_month
+     * @param $current_year
+     * @param $current_system_state
+     * @param $soc_end
+     * @param \DateTime $current_time
+     * @param $delta_time
+     */
+    //protected function calculateData($last_status, $region_oid, $site_oid, $this->packID, $sn_pack, $current_month, $current_year, $current_system_state, $soc_end, \DateTime $current_time, $delta_time)
+    //{
+    //    if ($last_status == null) {
+    //        echo 'insert new data on system ready';
+    //        DB::table('raw_availability')
+    //            ->insert([
+    //                'region_oid'      => $region_oid,
+    //                'site_oid'        => $site_oid,
+    //                'pack_id'         => ltrim($this->packID, 'pack'),
+    //                'serial_number'   => $sn_pack,
+    //                'month_of_data'   => $current_month,
+    //                'year_of_data'    => $current_year,
+    //                'system_state'    => $current_system_state,
+    //                'avg_bus_current' => 0,
+    //                'avg_bus_voltage' => 0,
+    //                'best_power'      => 0,
+    //                'peak_power'      => 0,
+    //                'soc_start'       => $soc_end,//because no data before
+    //                'soc_end'         => 0,
+    //                'max_bus_current' => 0,
+    //                'duration_hour'   => 0,
+    //                'created_at'      => $current_time->format('Y-m-d H:i:s'),
+    //            ]);
+    //
+    //
+    //    } elseif ($last_status->system_state != $current_system_state) {
+    //        echo 'update data and insert new data system_state';
+    //        $avg_vbus = DB::table('log_polling_data')
+    //            ->where('site_oid', '=', $site_oid)
+    //            ->where('parameter_id', '=', 2)
+    //            ->where('log_polling_data.updated_at', '>=', $last_status->created_at)
+    //            ->where('log_polling_data.updated_at', '<=', date('Y-m-d ', strtotime($current_time->format('Y-m-d H:i:s') . ' +1 day')))
+    //            ->average($this->packID);
+    //
+    //        $avg_ibus = DB::table('log_polling_data')
+    //            ->where('site_oid', '=', $site_oid)
+    //            ->where('parameter_id', '=', 3)
+    //            ->where('log_polling_data.updated_at', '>=', $last_status->created_at)
+    //            ->where('log_polling_data.updated_at', '<=', date('Y-m-d ', strtotime($current_time->format('Y-m-d H:i:s') . ' +1 day')))
+    //            ->average($this->packID);
+    //
+    //        $max_ibus = DB::table('log_polling_data')
+    //            ->where('site_oid', '=', $site_oid)
+    //            ->where('parameter_id', '=', 3)
+    //            ->where('log_polling_data.updated_at', '>=', $last_status->created_at)
+    //            ->where('log_polling_data.updated_at', '<=', date('Y-m-d ', strtotime($current_time->format('Y-m-d H:i:s') . ' +1 day')))
+    //            ->max($this->packID);
+    //
+    //        DB::table('raw_availability')
+    //            ->where('site_oid', '=', $site_oid)
+    //            ->where('pack_id', '=', ltrim($this->packID, 'pack'))
+    //            ->where('updated_at', '=', null)
+    //            ->update([
+    //                'avg_bus_current' => ($avg_ibus == null) ? 0 : $avg_ibus,
+    //                'avg_bus_voltage' => ($avg_vbus == null) ? 0 : $avg_vbus,
+    //                'best_power'      => 0,
+    //                'peak_power'      => 0,
+    //                'soc_end'         => $soc_end,
+    //                'max_bus_current' => ($max_ibus == null) ? 0 : $max_ibus,
+    //                'duration_hour'   => $delta_time,
+    //                'updated_at'      => $current_time->format('Y-m-d H:i:s'),
+    //            ]);
+    //
+    //        DB::table('raw_availability')
+    //            ->insert([
+    //                'region_oid'      => $region_oid,
+    //                'site_oid'        => $site_oid,
+    //                'pack_id'         => ltrim($this->packID, 'pack'),
+    //                'serial_number'   => $sn_pack,
+    //                'month_of_data'   => $current_month,
+    //                'year_of_data'    => $current_year,
+    //                'system_state'    => $current_system_state,
+    //                'avg_bus_current' => 0,
+    //                'avg_bus_voltage' => 0,
+    //                'best_power'      => 0,
+    //                'peak_power'      => 0,
+    //                'soc_start'       => $soc_end,//because no data before
+    //                'soc_end'         => 0,
+    //                'max_bus_current' => 0,
+    //                'duration_hour'   => 0,
+    //                'created_at'      => $current_time->format('Y-m-d H:i:s'),
+    //            ]);
+    //
+    //    } else {
+    //        echo 'update existing data';
+    //        $avg_vbus = DB::table('log_polling_data')
+    //            ->where('site_oid', '=', $site_oid)
+    //            ->where('parameter_id', '=', 2)
+    //            ->where('log_polling_data.updated_at', '>=', $last_status->created_at)
+    //            ->where('log_polling_data.updated_at', '<=', date('Y-m-d ', strtotime($current_time->format('Y-m-d H:i:s') . ' +1 day')))
+    //            ->average($this->packID);
+    //
+    //        $avg_ibus = DB::table('log_polling_data')
+    //            ->where('site_oid', '=', $site_oid)
+    //            ->where('parameter_id', '=', 3)
+    //            ->where('log_polling_data.updated_at', '>=', $last_status->created_at)
+    //            ->where('log_polling_data.updated_at', '<=', date('Y-m-d ', strtotime($current_time->format('Y-m-d H:i:s') . ' +1 day')))
+    //            ->average($this->packID);
+    //
+    //        $max_ibus = DB::table('log_polling_data')
+    //            ->where('site_oid', '=', $site_oid)
+    //            ->where('parameter_id', '=', 3)
+    //            ->where('log_polling_data.updated_at', '>=', $last_status->created_at)
+    //            ->where('log_polling_data.updated_at', '<=', date('Y-m-d ', strtotime($current_time->format('Y-m-d H:i:s') . ' +1 day')))
+    //            ->max($this->packID);
+    //
+    //        DB::table('raw_availability')
+    //            ->where('site_oid', '=', $site_oid)
+    //            ->where('pack_id', '=', ltrim($this->packID, 'pack'))
+    //            ->where('updated_at', '=', null)
+    //            ->update([
+    //                'avg_bus_current' => ($avg_ibus == null) ? 0 : $avg_ibus,
+    //                'avg_bus_voltage' => ($avg_vbus == null) ? 0 : $avg_vbus,
+    //                'best_power'      => 0,
+    //                'peak_power'      => 0,
+    //                'soc_end'         => $soc_end,
+    //                'max_bus_current' => ($max_ibus == null) ? 0 : $max_ibus,
+    //                'duration_hour'   => $delta_time,
+    //            ]);
+    //
+    //
+    //    }
+    //}
+}
